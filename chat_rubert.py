@@ -1,80 +1,88 @@
 # ==========================================================================
-# web.py — Flask-сервер: принимает текст, возвращает prediction тональности
+# chat_rubert.py — sentiment-классификатор на базе ruBERT (fine-tuned)
 # ==========================================================================
-# Запуск: uv run python web.py
-# Открыть: http://localhost:5001
-# Health: http://localhost:5001/health
+# Запуск вручную: uv run python chat_rubert.py
+# Импорт из web.py: from chat_rubert import load_model, predict
 # ==========================================================================
 
-import os
-import logging
-from flask import Flask, request, jsonify, render_template
+from pathlib import Path
+from typing import Any, Tuple
 
-from chat_rubert import load_model, predict
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-# ---------- Логирование ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+# Путь к весам — всегда рядом с этим файлом, независимо от cwd.
+MODEL_DIR = Path(__file__).parent / "rubert-classifier-full"
 
-app = Flask(__name__)
+MAX_LENGTH = 64
 
-# ---------- Загрузка модели ОДИН раз при старте ----------
-app.logger.info("Загружаю модель...")
-model, tokenizer, device = load_model()
-app.logger.info("Готово. Сервер стартует...")
+POSITIVE_LABEL_ID = 1
 
 
-# ---------- Роуты ----------
-@app.route("/")
-def index():
-    return render_template("index.html")
+def load_model(path: Path = MODEL_DIR) -> Tuple[Any, Any, torch.device]:
+    """Загружает ruBERT и возвращает (model, tokenizer, device)."""
+    if not path.is_dir():
+        raise FileNotFoundError(
+            f"Не найдена папка модели: {path}\n"
+            f"Убедись, что rubert-classifier-full лежит рядом с chat_rubert.py."
+        )
+
+    device = torch.device("cpu")
+
+    print(f"Загружаю ruBERT из {path}...")
+    tokenizer = AutoTokenizer.from_pretrained(str(path))
+    model = AutoModelForSequenceClassification.from_pretrained(str(path))
+    model.to(device)
+    model.eval()
+    print(f"Модель загружена. Device: {device}")
+    return model, tokenizer, device
 
 
-@app.route("/health")
-def health():
-    """Проверка, что сервер жив. Android может дёргать при старте."""
-    return jsonify({"status": "ok"})
+def predict(text: str, model, tokenizer, device) -> float:
+    """Возвращает вероятность ПОЗИТИВА (0.0..1.0)."""
+    if not isinstance(text, str):
+        raise TypeError(f"text must be str, got {type(text).__name__}")
+    if not text.strip():
+        raise ValueError("text is empty")
+
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=MAX_LENGTH,
+    ).to(device)
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+        probs = torch.softmax(outputs.logits, dim=-1)
+        prob_positive = probs[0, POSITIVE_LABEL_ID].item()
+    return prob_positive
 
 
-@app.route("/predict", methods=["POST"])
-def api_predict():
-    data = request.get_json(silent=True) or {}
-    text = (data.get("text") or "").strip()
+def main() -> None:
+    """Консольный режим."""
+    model, tokenizer, device = load_model()
+    print("Введите фразу. Пустая строка / exit / quit / q — выход.\n")
 
-    app.logger.info(f"/predict <- {text!r}")
+    while True:
+        try:
+            text = input(">>> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not text or text.lower() in {"exit", "quit", "q"}:
+            break
 
-    if not text:
-        app.logger.info("/predict -> 400 empty text")
-        return jsonify({"error": "empty text"}), 400
+        try:
+            prob = predict(text, model, tokenizer, device)
+        except ValueError as e:
+            print(f"Ошибка: {e}\n")
+            continue
 
-    try:
-        prob = predict(text, model, tokenizer, device)
-    except Exception as e:
-        app.logger.error(f"Prediction failed: {e}")
-        return jsonify({"error": "internal server error"}), 500
-
-    label = 1 if prob >= 0.5 else 0
-    sentiment = "positive" if label == 1 else "negative"
-
-    app.logger.info(f"/predict -> 200 {sentiment} (p={prob:.3f})")
-
-    return jsonify({
-        "text": text,
-        "label": label,
-        "sentiment": sentiment,
-        "prob": prob,
-    })
+        label = 1 if prob >= 0.5 else 0
+        verdict = "ПОЗИТИВ" if label == 1 else "НЕГАТИВ"
+        print(f"{verdict}  p(позитив)={prob:.3f}\n")
 
 
 if __name__ == "__main__":
-    # HOST и PORT можно переопределить через env.
-    # Для теста с реального телефона в Wi-Fi: HOST=0.0.0.0 uv run python web.py
-    host = os.environ.get("HOST", "127.0.0.1")
-    port = int(os.environ.get("PORT", "5001")) # Оставили ваш порт!
-    
-    debug = os.environ.get("FLASK_DEBUG", "0") == "1"
-    
-    app.run(host=host, port=port, debug=debug)
+    main()
