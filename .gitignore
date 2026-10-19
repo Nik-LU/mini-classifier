@@ -1,0 +1,19 @@
+# Виртуальное окружение
+.venv/
+venv/
+
+# Кэш Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Настройки окружения (если появятся)
+.env
+.env.local
+
+# Системный мусор macOS
+.DS_Store
+
+# --- САМОЕ ВАЖНОЕ ---
+# Веса модели (680 МБ). Их НЕЛЬЗЯ пушить на GitHub.
+rubert-classifier-full/
